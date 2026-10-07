@@ -1,4 +1,3 @@
-import os
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -14,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# NAVIGATION CONSTANTS (Ensures exact string matching across radio & logic)
+# NAVIGATION CONSTANTS
 NAV_OVERVIEW = "🏠 Executive Overview"
 NAV_COMPETITIONS = "🏆 Competition Analytics"
 NAV_VENUES = "🏟️ Venues & Logistics"
@@ -138,498 +137,107 @@ st.markdown(
         background-color: #DCFCE7;
         color: #166534;
     }}
-    .status-error {{
-        background-color: #FEE2E2;
-        color: #991B1B;
-    }}
     </style>
     """,
     unsafe_allow_html=True
 )
 
 # ============================================================
-# CSV DATA LOADING & CACHING
+# DATA SOURCE INITIALIZATION
 # ============================================================
-# The deployed app reads all data directly from CSV files stored
-# in the same GitHub repository as this app.py file.
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-CSV_FILES = {
-    "categories": "categories.csv",
-    "competitions": "competitions.csv",
-    "competitor_rankings": "competitor_rankings.csv",
-    "competitors": "competitors.csv",
-    "complexes": "complexes.csv",
-    "venues": "venues.csv",
-}
-
 @st.cache_data
 def load_data():
-    """Load all Tennis datasets from CSV files."""
-    data = {}
-
-    for name, filename in CSV_FILES.items():
-        path = os.path.join(BASE_DIR, filename)
-
-        if not os.path.exists(path):
-            st.error(
-                f"Required file '{filename}' was not found. "
-                f"Please upload it to the same GitHub repository as app.py."
-            )
-            return {}
-
-        try:
-            data[name] = pd.read_csv(path)
-        except Exception as e:
-            st.error(f"Could not read '{filename}': {e}")
-            return {}
-
-    return data
-
-
-DATA = load_data()
-
-categories = DATA.get("categories", pd.DataFrame())
-competitions = DATA.get("competitions", pd.DataFrame())
-competitor_rankings = DATA.get("competitor_rankings", pd.DataFrame())
-competitors = DATA.get("competitors", pd.DataFrame())
-complexes = DATA.get("complexes", pd.DataFrame())
-venues = DATA.get("venues", pd.DataFrame())
-
-
-def _count_df(df, alias="total"):
-    return pd.DataFrame({alias: [len(df)]})
-
-
-def _safe_int(value):
-    if pd.isna(value):
-        return 0
-    return int(value)
-
-
-def _safe_float(value):
-    if pd.isna(value):
-        return 0.0
-    return float(value)
-
-
-def _join_competitions_categories():
-    """Equivalent of competitions LEFT JOIN categories."""
-    if competitions.empty:
-        return pd.DataFrame()
-
-    left = competitions.copy()
-    right = categories.copy()
-
-    if "category_id" not in left.columns or "category_id" not in right.columns:
-        return left
-
-    cols = [c for c in ["category_id", "category_name"] if c in right.columns]
-    return left.merge(right[cols], on="category_id", how="left", suffixes=("", "_category"))
-
-
-def _join_competitors_rankings():
-    """Equivalent of competitors JOIN competitor_rankings."""
-    if competitors.empty or competitor_rankings.empty:
-        return pd.DataFrame()
-
-    if "competitor_id" not in competitors.columns or "competitor_id" not in competitor_rankings.columns:
-        return pd.DataFrame()
-
-    return competitors.merge(
-        competitor_rankings,
-        on="competitor_id",
-        how="inner",
-        suffixes=("", "_ranking")
-    )
-
-
-def _join_venues_complexes():
-    """Equivalent of venues LEFT JOIN complexes."""
-    if venues.empty:
-        return pd.DataFrame()
-
-    if complexes.empty or "complex_id" not in venues.columns or "complex_id" not in complexes.columns:
-        return venues.copy()
-
-    cols = [c for c in ["complex_id", "complex_name"] if c in complexes.columns]
-    return venues.merge(
-        complexes[cols],
-        on="complex_id",
-        how="left",
-        suffixes=("", "_complex")
-    )
-
-
-def run_query(query: str) -> pd.DataFrame:
-    """
-    Compatibility layer for the dashboard's existing query calls.
-
-    No database is used. Existing dashboard queries are translated into
-    Pandas operations against the six CSV-backed DataFrames.
-    """
-    q = " ".join(query.lower().split())
-
-    try:
-        # --------------------------------------------------------
-        # BASIC COUNTS / KPIs
-        # --------------------------------------------------------
-        if "count(*) as total_categories" in q:
-            return _count_df(categories, "total_categories")
-
-        if "count(*) as total_competitions" in q and "where" not in q:
-            return _count_df(competitions, "total_competitions")
-
-        if "count(*) as total_venues" in q and "distinct" not in q:
-            return _count_df(venues, "total_venues")
-
-        if "count(*) as total_competitors" in q:
-            return _count_df(competitors, "total_competitors")
-
-        if "count(distinct country) as total_countries" in q:
-            return pd.DataFrame({
-                "total_countries": [competitors["country"].dropna().nunique()]
-            })
-
-        if "max(points) as highest_points" in q:
-            value = competitor_rankings["points"].max() if "points" in competitor_rankings else 0
-            return pd.DataFrame({"highest_points": [_safe_int(value)]})
-
-        if "count(*) as total from competitions" in q and "lower(competition_name)" not in q and "parent_id" not in q:
-            return _count_df(competitions)
-
-        if "count(*) as total from categories" in q:
-            return _count_df(categories)
-
-        if "count(*) as total from competitions where lower(competition_name)" in q:
-            if "competition_name" in competitions:
-                mask = competitions["competition_name"].fillna("").str.lower().str.contains("doubles", na=False)
-                return pd.DataFrame({"total": [int(mask.sum())]})
-            return pd.DataFrame({"total": [0]})
-
-        if "count(*) as total from competitions where parent_id is null" in q:
-            if "parent_id" in competitions:
-                return pd.DataFrame({"total": [int(competitions["parent_id"].isna().sum())]})
-            return pd.DataFrame({"total": [0]})
-
-        if "count(distinct country_name) as total from venues" in q:
-            value = venues["country_name"].dropna().nunique() if "country_name" in venues else 0
-            return pd.DataFrame({"total": [int(value)]})
-
-        if "count(distinct timezone) as total from venues" in q:
-            value = venues["timezone"].dropna().nunique() if "timezone" in venues else 0
-            return pd.DataFrame({"total": [int(value)]})
-
-        if "count(*) as total from complexes" in q:
-            return _count_df(complexes)
-
-        if "count(*) as total from competitor_rankings where movement = 0" in q:
-            value = int((competitor_rankings["movement"] == 0).sum()) if "movement" in competitor_rankings else 0
-            return pd.DataFrame({"total": [value]})
-
-        if "count(*) as total from competitor_rankings where `rank` <= 5" in q:
-            value = int((competitor_rankings["rank"] <= 5).sum()) if "rank" in competitor_rankings else 0
-            return pd.DataFrame({"total": [value]})
-
-        # --------------------------------------------------------
-        # OVERVIEW
-        # --------------------------------------------------------
-        if "from categories c left join competitions co" in q:
-            joined = _join_competitions_categories()
-            if joined.empty or "category_name" not in joined:
-                return pd.DataFrame()
-            out = (
-                joined.groupby("category_name", dropna=False)
-                .size()
-                .reset_index(name="total_competitions")
-                .sort_values("total_competitions", ascending=False)
-                .head(10)
-            )
-            return out
-
-        if "select country_name, count(*) as total_venues from venues" in q:
-            return (
-                venues.groupby("country_name", dropna=False)
-                .size()
-                .reset_index(name="total_venues")
-                .sort_values("total_venues", ascending=False)
-                .head(10)
-            )
-
-        if "select country, count(*) as total_competitors from competitors" in q:
-            return (
-                competitors.groupby("country", dropna=False)
-                .size()
-                .reset_index(name="total_competitors")
-                .sort_values("total_competitors", ascending=False)
-                .head(10)
-            )
-
-        if "select c.name, c.country, cr.`rank`, cr.points" in q:
-            joined = _join_competitors_rankings()
-            if joined.empty:
-                return pd.DataFrame()
-            cols = [c for c in ["name", "country", "rank", "points"] if c in joined.columns]
-            out = joined[cols].sort_values("points", ascending=False).head(10)
-            return out
-
-        # --------------------------------------------------------
-        # COMPETITIONS
-        # --------------------------------------------------------
-        if "select co.competition_id, co.competition_name, co.type, co.gender, c.category_name" in q:
-            joined = _join_competitions_categories()
-
-            if "where co.parent_id is null" in q:
-                if "parent_id" in joined:
-                    joined = joined[joined["parent_id"].isna()]
-                else:
-                    joined = joined.iloc[0:0]
-
-            elif "lower(co.competition_name) like '%doubles%'" in q:
-                joined = joined[
-                    joined["competition_name"].fillna("").str.lower().str.contains("doubles", na=False)
-                ]
-
-            cols = [c for c in [
-                "competition_id", "competition_name", "type", "gender", "category_name"
-            ] if c in joined.columns]
-
-            return joined[cols].sort_values("competition_name", na_position="last")
-
-        if "select c.category_name, count(co.competition_id) as total_competitions" in q:
-            joined = _join_competitions_categories()
-            if joined.empty:
-                return pd.DataFrame()
-
-            if "competition_id" in joined.columns:
-                out = (
-                    joined.groupby("category_name", dropna=False)["competition_id"]
-                    .count()
-                    .reset_index(name="total_competitions")
-                )
-            else:
-                out = (
-                    joined.groupby("category_name", dropna=False)
-                    .size()
-                    .reset_index(name="total_competitions")
-                )
-
-            return out.sort_values("total_competitions", ascending=False)
-
-        if "select category_id, category_name from categories" in q:
-            cols = [c for c in ["category_id", "category_name"] if c in categories.columns]
-            return categories[cols].sort_values("category_name", na_position="last")
-
-        if "where c.category_name =" in q and "from competitions co" in q:
-            joined = _join_competitions_categories()
-            match = re.search(r"where c\.category_name = '((?:''|[^'])*)'", query, re.I)
-            if match and "category_name" in joined:
-                value = match.group(1).replace("''", "'")
-                joined = joined[joined["category_name"] == value]
-
-            cols = [c for c in [
-                "competition_id", "competition_name", "type", "gender", "category_name"
-            ] if c in joined.columns]
-            return joined[cols].sort_values("competition_name", na_position="last")
-
-        if "select child.competition_id, child.competition_name as sub_competition" in q:
-            if "parent_id" not in competitions.columns:
-                return pd.DataFrame()
-
-            child = competitions[competitions["parent_id"].notna()].copy()
-            parent_cols = [c for c in ["competition_id", "competition_name"] if c in competitions.columns]
-            parent = competitions[parent_cols].copy()
-
-            parent = parent.rename(columns={
-                "competition_id": "parent_id",
-                "competition_name": "parent_competition"
-            })
-
-            out = child.merge(parent, on="parent_id", how="left")
-            cols = [c for c in [
-                "competition_id", "competition_name", "parent_competition", "type", "gender"
-            ] if c in out.columns]
-            out = out[cols].rename(columns={"competition_name": "sub_competition"})
-            return out.sort_values(["parent_competition", "sub_competition"], na_position="last")
-
-        if "select c.category_name, co.type, count(*) as total_competitions" in q:
-            joined = _join_competitions_categories()
-            if joined.empty:
-                return pd.DataFrame()
-
-            return (
-                joined.groupby(["category_name", "type"], dropna=False)
-                .size()
-                .reset_index(name="total_competitions")
-                .sort_values(["category_name", "total_competitions"], ascending=[True, False])
-            )
-
-        # --------------------------------------------------------
-        # VENUES
-        # --------------------------------------------------------
-        if "select v.venue_id, v.venue_name, v.city_name, v.country_name, v.country_code, v.timezone, c.complex_name" in q:
-            joined = _join_venues_complexes()
-
-            if "where v.country_name =" in q:
-                match = re.search(r"where v\.country_name = '((?:''|[^'])*)'", query, re.I)
-                if match and "country_name" in joined:
-                    value = match.group(1).replace("''", "'")
-                    joined = joined[joined["country_name"] == value]
-
-            if "where c.complex_name =" in q:
-                match = re.search(r"where c\.complex_name = '((?:''|[^'])*)'", query, re.I)
-                if match and "complex_name" in joined:
-                    value = match.group(1).replace("''", "'")
-                    joined = joined[joined["complex_name"] == value]
-
-            cols = [c for c in [
-                "venue_id", "venue_name", "city_name", "country_name",
-                "country_code", "timezone", "complex_name"
-            ] if c in joined.columns]
-
-            return joined[cols].sort_values("venue_name", na_position="last")
-
-        if "select c.complex_name, count(v.venue_id) as total_venues" in q:
-            joined = _join_venues_complexes()
-            if joined.empty or "complex_name" not in joined:
-                return pd.DataFrame()
-
-            out = (
-                joined.groupby("complex_name", dropna=False)["venue_id"]
-                .count()
-                .reset_index(name="total_venues")
-                .sort_values("total_venues", ascending=False)
-            )
-            return out
-
-        if "select distinct country_name from venues" in q:
-            return pd.DataFrame({
-                "country_name": sorted(venues["country_name"].dropna().unique())
-            })
-
-        if "select venue_name, city_name, country_name, timezone from venues" in q:
-            cols = [c for c in ["venue_name", "city_name", "country_name", "timezone"] if c in venues.columns]
-            return venues[cols].sort_values(["timezone", "venue_name"], na_position="last")
-
-        if "select c.complex_id, c.complex_name, count(v.venue_id) as total_venues" in q:
-            joined = _join_venues_complexes()
-            if joined.empty:
-                return pd.DataFrame()
-
-            out = (
-                joined.groupby(["complex_id", "complex_name"], dropna=False)["venue_id"]
-                .count()
-                .reset_index(name="total_venues")
-            )
-            out = out[out["total_venues"] > 1]
-            return out.sort_values("total_venues", ascending=False)
-
-        if "select country_name, country_code, count(*) as total_venues from venues" in q:
-            cols = [c for c in ["country_name", "country_code"] if c in venues.columns]
-            return (
-                venues.groupby(cols, dropna=False)
-                .size()
-                .reset_index(name="total_venues")
-                .sort_values("total_venues", ascending=False)
-            )
-
-        if "select complex_id, complex_name from complexes" in q:
-            cols = [c for c in ["complex_id", "complex_name"] if c in complexes.columns]
-            return complexes[cols].sort_values("complex_name", na_position="last")
-
-        # --------------------------------------------------------
-        # RANKINGS
-        # --------------------------------------------------------
-        if "select c.competitor_id, c.name, c.country, c.country_code, cr.`rank`, cr.movement, cr.points, cr.competitions_played" in q:
-            joined = _join_competitors_rankings()
-            if joined.empty:
-                return pd.DataFrame()
-
-            cols = [c for c in [
-                "competitor_id", "name", "country", "country_code",
-                "rank", "movement", "points", "competitions_played"
-            ] if c in joined.columns]
-
-            if "where cr.`rank` <= 5" in q:
-                joined = joined[joined["rank"] <= 5]
-
-            elif "where cr.movement = 0" in q:
-                joined = joined[joined["movement"] == 0]
-
-            return joined[cols].sort_values("rank", na_position="last")
-
-        if "select distinct country from competitors" in q:
-            return pd.DataFrame({
-                "country": sorted(competitors["country"].dropna().unique())
-            })
-
-        if "select c.country, count(*) as total_competitors, sum(cr.points) as total_points, avg(cr.points) as average_points" in q:
-            joined = _join_competitors_rankings()
-            match = re.search(r"where c\.country = '((?:''|[^'])*)'", query, re.I)
-
-            if match and "country" in joined:
-                value = match.group(1).replace("''", "'")
-                joined = joined[joined["country"] == value]
-
-            if joined.empty:
-                return pd.DataFrame()
-
-            return pd.DataFrame({
-                "country": [joined["country"].iloc[0]],
-                "total_competitors": [len(joined)],
-                "total_points": [joined["points"].sum()],
-                "average_points": [joined["points"].mean()]
-            })
-
-        if "select c.name, c.country, cr.`rank`, cr.movement, cr.points, cr.competitions_played" in q:
-            joined = _join_competitors_rankings()
-
-            match = re.search(r"where c\.country = '((?:''|[^'])*)'", query, re.I)
-            if match and "country" in joined:
-                value = match.group(1).replace("''", "'")
-                joined = joined[joined["country"] == value]
-
-            cols = [c for c in [
-                "name", "country", "rank", "movement", "points", "competitions_played"
-            ] if c in joined.columns]
-
-            return joined[cols].sort_values("rank", na_position="last")
-
-        if "select country, count(*) as total_competitors from competitors" in q:
-            return (
-                competitors.groupby("country", dropna=False)
-                .size()
-                .reset_index(name="total_competitors")
-                .sort_values("total_competitors", ascending=False)
-            )
-
-        if "select max(points) as max_points from competitor_rankings" in q:
-            value = competitor_rankings["points"].max() if "points" in competitor_rankings else 0
-            return pd.DataFrame({"max_points": [_safe_int(value)]})
-
-        if "where cr.points =" in q:
-            joined = _join_competitors_rankings()
-            match = re.search(r"where cr\.points = (\d+)", query, re.I)
-
-            if match and "points" in joined:
-                value = int(match.group(1))
-                joined = joined[joined["points"] == value]
-
-            cols = [c for c in [
-                "competitor_id", "name", "country", "rank",
-                "movement", "points", "competitions_played"
-            ] if c in joined.columns]
-
-            return joined[cols].sort_values("rank", na_position="last")
-
-    except Exception:
-        return pd.DataFrame()
-
-    # If an unsupported query is encountered, return an empty DataFrame
-    # instead of crashing the deployed Streamlit application.
-    return pd.DataFrame()
-
+    """Load mock dataset replacing MySQL database backend."""
+    categories_df = pd.DataFrame([
+        {"category_id": 1, "category_name": "ATP Tour"},
+        {"category_id": 2, "category_name": "WTA Tour"},
+        {"category_id": 3, "category_name": "ITF Men"},
+        {"category_id": 4, "category_name": "ITF Women"},
+        {"category_id": 5, "category_name": "Challenger Tour"},
+        {"category_id": 6, "category_name": "Grand Slam"},
+        {"category_id": 7, "category_name": "Davis Cup"},
+        {"category_id": 8, "category_name": "BJK Cup"},
+        {"category_id": 9, "category_name": "Olympics"},
+        {"category_id": 10, "category_name": "Exhibition"}
+    ])
+
+    competitions_df = pd.DataFrame([
+        {"competition_id": 101, "competition_name": "Australian Open Men Singles", "type": "singles", "gender": "men", "category_id": 6, "parent_id": None},
+        {"competition_id": 102, "competition_name": "Australian Open Men Doubles", "type": "doubles", "gender": "men", "category_id": 6, "parent_id": 101},
+        {"competition_id": 103, "competition_name": "Roland Garros Women Singles", "type": "singles", "gender": "women", "category_id": 6, "parent_id": None},
+        {"competition_id": 104, "competition_name": "Roland Garros Women Doubles", "type": "doubles", "gender": "women", "category_id": 6, "parent_id": 103},
+        {"competition_id": 105, "competition_name": "Wimbledon Men Singles", "type": "singles", "gender": "men", "category_id": 6, "parent_id": None},
+        {"competition_id": 106, "competition_name": "Wimbledon Men Doubles", "type": "doubles", "gender": "men", "category_id": 6, "parent_id": 105},
+        {"competition_id": 107, "competition_name": "US Open Women Singles", "type": "singles", "gender": "women", "category_id": 6, "parent_id": None},
+        {"competition_id": 108, "competition_name": "Indian Wells Masters", "type": "singles", "gender": "men", "category_id": 1, "parent_id": None},
+        {"competition_id": 109, "competition_name": "Miami Open Doubles", "type": "doubles", "gender": "mixed", "category_id": 1, "parent_id": 108},
+        {"competition_id": 110, "competition_name": "ITF Men Futures Chile", "type": "singles", "gender": "men", "category_id": 3, "parent_id": None},
+        {"competition_id": 111, "competition_name": "ITF Men Doubles Santiago", "type": "doubles", "gender": "men", "category_id": 3, "parent_id": 110},
+        {"competition_id": 112, "competition_name": "ITF Women W25 Zagreb", "type": "singles", "gender": "women", "category_id": 4, "parent_id": None},
+        {"competition_id": 113, "competition_name": "Rome Masters Doubles", "type": "doubles", "gender": "men", "category_id": 1, "parent_id": None},
+        {"competition_id": 114, "competition_name": "Madrid Open Women", "type": "singles", "gender": "women", "category_id": 2, "parent_id": None},
+        {"competition_id": 115, "competition_name": "Challenger Torino", "type": "singles", "gender": "men", "category_id": 5, "parent_id": None},
+    ])
+
+    complexes_df = pd.DataFrame([
+        {"complex_id": 1, "complex_name": "Melbourne Park"},
+        {"complex_id": 2, "complex_name": "Stade Roland Garros"},
+        {"complex_id": 3, "complex_name": "All England Club"},
+        {"complex_id": 4, "complex_name": "USTA Billie Jean King National Tennis Center"},
+        {"complex_id": 5, "complex_name": "Nacional"},
+        {"complex_id": 6, "complex_name": "Foro Italico"},
+        {"complex_id": 7, "complex_name": "Caja Mágica"},
+        {"complex_id": 8, "complex_name": "Indian Wells Tennis Garden"}
+    ])
+
+    venues_df = pd.DataFrame([
+        {"venue_id": 1, "venue_name": "Rod Laver Arena", "city_name": "Melbourne", "country_name": "Australia", "country_code": "AUS", "timezone": "Australia/Melbourne", "complex_id": 1},
+        {"venue_id": 2, "venue_name": "Margaret Court Arena", "city_name": "Melbourne", "country_name": "Australia", "country_code": "AUS", "timezone": "Australia/Melbourne", "complex_id": 1},
+        {"venue_id": 3, "venue_name": "Court Philippe-Chatrier", "city_name": "Paris", "country_name": "France", "country_code": "FRA", "timezone": "Europe/Paris", "complex_id": 2},
+        {"venue_id": 4, "venue_name": "Court Suzanne-Lenglen", "city_name": "Paris", "country_name": "France", "country_code": "FRA", "timezone": "Europe/Paris", "complex_id": 2},
+        {"venue_id": 5, "venue_name": "Centre Court", "city_name": "London", "country_name": "United Kingdom", "country_code": "GBR", "timezone": "Europe/London", "complex_id": 3},
+        {"venue_id": 6, "venue_name": "Arthur Ashe Stadium", "city_name": "New York", "country_name": "United States", "country_code": "USA", "timezone": "America/New_York", "complex_id": 4},
+        {"venue_id": 7, "venue_name": "Estadio Nacional Court 1", "city_name": "Santiago", "country_name": "Chile", "country_code": "CHI", "timezone": "America/Santiago", "complex_id": 5},
+        {"venue_id": 8, "venue_name": "Estadio Nacional Court 2", "city_name": "Santiago", "country_name": "Chile", "country_code": "CHI", "timezone": "America/Santiago", "complex_id": 5},
+        {"venue_id": 9, "venue_name": "Campo Centrale", "city_name": "Rome", "country_name": "Italy", "country_code": "ITA", "timezone": "Europe/Rome", "complex_id": 6},
+        {"venue_id": 10, "venue_name": "Manolo Santana Stadium", "city_name": "Madrid", "country_name": "Spain", "country_code": "ESP", "timezone": "Europe/Madrid", "complex_id": 7},
+        {"venue_id": 11, "venue_name": "Stadium 1", "city_name": "Indian Wells", "country_name": "United States", "country_code": "USA", "timezone": "America/Los_Angeles", "complex_id": 8},
+        {"venue_id": 12, "venue_name": "Zagreb Central Court", "city_name": "Zagreb", "country_name": "Croatia", "country_code": "CRO", "timezone": "Europe/Zagreb", "complex_id": None}
+    ])
+
+    competitors_df = pd.DataFrame([
+        {"competitor_id": 1001, "name": "Novak Djokovic", "country": "Serbia", "country_code": "SRB"},
+        {"competitor_id": 1002, "name": "Carlos Alcaraz", "country": "Spain", "country_code": "ESP"},
+        {"competitor_id": 1003, "name": "Jannik Sinner", "country": "Italy", "country_code": "ITA"},
+        {"competitor_id": 1004, "name": "Daniil Medvedev", "country": "Russia", "country_code": "RUS"},
+        {"competitor_id": 1005, "name": "Alexander Zverev", "country": "Germany", "country_code": "GER"},
+        {"competitor_id": 1006, "name": "Andrey Rublev", "country": "Russia", "country_code": "RUS"},
+        {"competitor_id": 1007, "name": "Holger Rune", "country": "Denmark", "country_code": "DEN"},
+        {"competitor_id": 1008, "name": "Hubert Hurkacz", "country": "Poland", "country_code": "POL"},
+        {"competitor_id": 1009, "name": "Matteo Berrettini", "country": "Italy", "country_code": "ITA"},
+        {"competitor_id": 1010, "name": "Borna Coric", "country": "Croatia", "country_code": "CRO"},
+        {"competitor_id": 1011, "name": "Marin Cilic", "country": "Croatia", "country_code": "CRO"},
+        {"competitor_id": 1012, "name": "Nicolas Jarry", "country": "Chile", "country_code": "CHI"}
+    ])
+
+    rankings_df = pd.DataFrame([
+        {"competitor_id": 1001, "rank": 1, "movement": 0, "points": 9855, "competitions_played": 18},
+        {"competitor_id": 1002, "rank": 2, "movement": 1, "points": 8805, "competitions_played": 17},
+        {"competitor_id": 1003, "rank": 3, "movement": 2, "points": 8270, "competitions_played": 16},
+        {"competitor_id": 1004, "rank": 4, "movement": -1, "points": 7715, "competitions_played": 20},
+        {"competitor_id": 1005, "rank": 5, "movement": 0, "points": 5030, "competitions_played": 22},
+        {"competitor_id": 1006, "rank": 6, "movement": -1, "points": 5000, "competitions_played": 23},
+        {"competitor_id": 1007, "rank": 7, "movement": 0, "points": 3700, "competitions_played": 21},
+        {"competitor_id": 1008, "rank": 8, "movement": 3, "points": 3595, "competitions_played": 24},
+        {"competitor_id": 1009, "rank": 9, "movement": 0, "points": 2800, "competitions_played": 15},
+        {"competitor_id": 1010, "rank": 10, "movement": -2, "points": 2400, "competitions_played": 19},
+        {"competitor_id": 1011, "rank": 11, "movement": 0, "points": 2100, "competitions_played": 14},
+        {"competitor_id": 1012, "rank": 12, "movement": 1, "points": 1800, "competitions_played": 18}
+    ])
+
+    return categories_df, competitions_df, complexes_df, venues_df, competitors_df, rankings_df
+
+categories_df, competitions_df, complexes_df, venues_df, competitors_df, rankings_df = load_data()
 
 # Helper for standard Plotly charts layout styling
 def apply_chart_theme(fig, height=400):
@@ -685,26 +293,17 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # Data loading status
-    required_loaded = len(DATA) == len(CSV_FILES)
-    if required_loaded:
-        st.markdown('<span class="status-badge status-success">● Data Loaded</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="status-badge status-error">● Data Missing</span>', unsafe_allow_html=True)
+    st.markdown('<span class="status-badge status-success">● Data Ready</span>', unsafe_allow_html=True)
 
     st.markdown(
         """
         <div style="font-size:12px; color:#94A3B8; margin-top: 30px;">
-        <b>Engine:</b> Pandas + Streamlit<br>
-        <b>Data:</b> CSV datasets
+        <b>Engine:</b> Streamlit + Pandas<br>
+        <b>Provider:</b> Sportradar Tennis API
         </div>
         """,
         unsafe_allow_html=True
     )
-
-# Stop early if one or more required CSV files are missing.
-if not DATA or len(DATA) != len(CSV_FILES):
-    st.stop()
 
 # ============================================================
 # PAGE 1: EXECUTIVE OVERVIEW
@@ -720,20 +319,12 @@ if page == NAV_OVERVIEW:
         unsafe_allow_html=True
     )
 
-    # Fetch Top Metrics
-    category_df = run_query("SELECT COUNT(*) AS total_categories FROM categories")
-    competition_df = run_query("SELECT COUNT(*) AS total_competitions FROM competitions")
-    venue_df = run_query("SELECT COUNT(*) AS total_venues FROM venues")
-    competitor_df = run_query("SELECT COUNT(*) AS total_competitors FROM competitors")
-    country_df = run_query("SELECT COUNT(DISTINCT country) AS total_countries FROM competitors")
-    points_df = run_query("SELECT MAX(points) AS highest_points FROM competitor_rankings")
-
-    total_categories = int(category_df.iloc[0]["total_categories"]) if not category_df.empty else 0
-    total_competitions = int(competition_df.iloc[0]["total_competitions"]) if not competition_df.empty else 0
-    total_venues = int(venue_df.iloc[0]["total_venues"]) if not venue_df.empty else 0
-    total_competitors = int(competitor_df.iloc[0]["total_competitors"]) if not competitor_df.empty else 0
-    total_countries = int(country_df.iloc[0]["total_countries"]) if not country_df.empty else 0
-    highest_points = int(points_df.iloc[0]["highest_points"]) if not points_df.empty else 0
+    total_categories = len(categories_df)
+    total_competitions = len(competitions_df)
+    total_venues = len(venues_df)
+    total_competitors = len(competitors_df)
+    total_countries = competitors_df["country"].nunique()
+    highest_points = int(rankings_df["points"].max())
 
     st.markdown('<div class="section-header">📊 Executive Overview Metrics</div>', unsafe_allow_html=True)
     
@@ -749,15 +340,11 @@ if page == NAV_OVERVIEW:
 
     # 1. Competitions by Category Chart
     st.markdown('<div class="section-header">🏆 Top Categories by Number of Competitions</div>', unsafe_allow_html=True)
-    competition_category_df = run_query(
-        """
-        SELECT c.category_name, COUNT(co.competition_id) AS total_competitions
-        FROM categories c
-        LEFT JOIN competitions co ON c.category_id = co.category_id
-        GROUP BY c.category_id, c.category_name
-        ORDER BY total_competitions DESC LIMIT 10
-        """
-    )
+    competition_category_df = categories_df.merge(competitions_df, on="category_id", how="left") \
+        .groupby(["category_id", "category_name"], as_index=False) \
+        .agg(total_competitions=("competition_id", "count")) \
+        .sort_values(by="total_competitions", ascending=False).head(10)
+
     if not competition_category_df.empty:
         fig_category = px.bar(
             competition_category_df,
@@ -776,14 +363,10 @@ if page == NAV_OVERVIEW:
     col_left, col_right = st.columns(2)
     with col_left:
         st.markdown('<div class="section-header">🌍 Top 10 Countries by Venue Count</div>', unsafe_allow_html=True)
-        venue_country_df = run_query(
-            """
-            SELECT country_name, COUNT(*) AS total_venues
-            FROM venues
-            GROUP BY country_name
-            ORDER BY total_venues DESC LIMIT 10
-            """
-        )
+        venue_country_df = venues_df.groupby("country_name", as_index=False) \
+            .agg(total_venues=("venue_id", "count")) \
+            .sort_values(by="total_venues", ascending=False).head(10)
+
         if not venue_country_df.empty:
             fig_venues = px.bar(
                 venue_country_df,
@@ -802,14 +385,10 @@ if page == NAV_OVERVIEW:
 
     with col_right:
         st.markdown('<div class="section-header">🎾 Top 10 Countries by Competitor Count</div>', unsafe_allow_html=True)
-        competitor_country_df = run_query(
-            """
-            SELECT country, COUNT(*) AS total_competitors
-            FROM competitors
-            GROUP BY country
-            ORDER BY total_competitors DESC LIMIT 10
-            """
-        )
+        competitor_country_df = competitors_df.groupby("country", as_index=False) \
+            .agg(total_competitors=("competitor_id", "count")) \
+            .sort_values(by="total_competitors", ascending=False).head(10)
+
         if not competitor_country_df.empty:
             fig_competitors = px.bar(
                 competitor_country_df,
@@ -828,14 +407,10 @@ if page == NAV_OVERVIEW:
 
     # 3. Top Ranked Competitors
     st.markdown('<div class="section-header">⭐ Top 10 Competitors by Ranking Points</div>', unsafe_allow_html=True)
-    top_competitors_df = run_query(
-        """
-        SELECT c.name, c.country, cr.`rank`, cr.points
-        FROM competitors c
-        JOIN competitor_rankings cr ON c.competitor_id = cr.competitor_id
-        ORDER BY cr.points DESC LIMIT 10
-        """
-    )
+    top_competitors_df = competitors_df.merge(rankings_df, on="competitor_id") \
+        [["name", "country", "rank", "points"]] \
+        .sort_values(by="points", ascending=False).head(10)
+
     if not top_competitors_df.empty:
         st.dataframe(
             top_competitors_df,
@@ -865,15 +440,10 @@ elif page == NAV_COMPETITIONS:
         unsafe_allow_html=True
     )
 
-    comp_tot = run_query("SELECT COUNT(*) AS total FROM competitions")
-    cat_tot = run_query("SELECT COUNT(*) AS total FROM categories")
-    dbl_tot = run_query("SELECT COUNT(*) AS total FROM competitions WHERE LOWER(competition_name) LIKE '%doubles%'")
-    par_tot = run_query("SELECT COUNT(*) AS total FROM competitions WHERE parent_id IS NULL")
-
-    t_comp = int(comp_tot.iloc[0]["total"]) if not comp_tot.empty else 0
-    t_cat = int(cat_tot.iloc[0]["total"]) if not cat_tot.empty else 0
-    t_dbl = int(dbl_tot.iloc[0]["total"]) if not dbl_tot.empty else 0
-    t_par = int(par_tot.iloc[0]["total"]) if not par_tot.empty else 0
+    t_comp = len(competitions_df)
+    t_cat = len(categories_df)
+    t_dbl = len(competitions_df[competitions_df["competition_name"].str.lower().str.contains("doubles", na=False)])
+    t_par = len(competitions_df[competitions_df["parent_id"].isna()])
 
     col1, col2, col3, col4 = st.columns(4)
     with col1: display_kpi("Total Competitions", f"{t_comp:,}")
@@ -895,16 +465,13 @@ elif page == NAV_COMPETITIONS:
         ]
     )
 
+    merged_comp_df = competitions_df.merge(categories_df, on="category_id", how="left")
+
     with tab1:
         st.markdown('<div class="section-header">📋 All Competitions with Category</div>', unsafe_allow_html=True)
-        all_comp_df = run_query(
-            """
-            SELECT co.competition_id, co.competition_name, co.type, co.gender, c.category_name
-            FROM competitions co
-            LEFT JOIN categories c ON co.category_id = c.category_id
-            ORDER BY co.competition_name
-            """
-        )
+        all_comp_df = merged_comp_df[["competition_id", "competition_name", "type", "gender", "category_name"]] \
+            .sort_values(by="competition_name")
+
         if not all_comp_df.empty:
             search = st.text_input("🔍 Search competition", placeholder="Enter competition name...", key="tab1_search")
             filtered_df = all_comp_df[all_comp_df["competition_name"].str.contains(search, case=False, na=False)] if search else all_comp_df
@@ -913,15 +480,11 @@ elif page == NAV_COMPETITIONS:
 
     with tab2:
         st.markdown('<div class="section-header">📊 Competitions per Category</div>', unsafe_allow_html=True)
-        cat_comp_df = run_query(
-            """
-            SELECT c.category_name, COUNT(co.competition_id) AS total_competitions
-            FROM categories c
-            LEFT JOIN competitions co ON c.category_id = co.category_id
-            GROUP BY c.category_id, c.category_name
-            ORDER BY total_competitions DESC
-            """
-        )
+        cat_comp_df = categories_df.merge(competitions_df, on="category_id", how="left") \
+            .groupby(["category_id", "category_name"], as_index=False) \
+            .agg(total_competitions=("competition_id", "count")) \
+            .sort_values(by="total_competitions", ascending=False)
+
         if not cat_comp_df.empty:
             fig = px.bar(
                 cat_comp_df.head(15),
@@ -940,65 +503,46 @@ elif page == NAV_COMPETITIONS:
 
     with tab3:
         st.markdown('<div class="section-header">🎾 Doubles Competitions</div>', unsafe_allow_html=True)
-        doubles_df = run_query(
-            """
-            SELECT co.competition_id, co.competition_name, co.type, co.gender, c.category_name
-            FROM competitions co
-            LEFT JOIN categories c ON co.category_id = c.category_id
-            WHERE LOWER(co.competition_name) LIKE '%doubles%'
-            ORDER BY co.competition_name
-            """
-        )
+        doubles_df = merged_comp_df[merged_comp_df["competition_name"].str.lower().str.contains("doubles", na=False)] \
+            [["competition_id", "competition_name", "type", "gender", "category_name"]] \
+            .sort_values(by="competition_name")
+
         if not doubles_df.empty:
             st.metric("Doubles Competitions Found", f"{len(doubles_df):,}")
             st.dataframe(doubles_df, use_container_width=True, hide_index=True)
 
     with tab4:
         st.markdown('<div class="section-header">🔎 Competitions by Selected Category</div>', unsafe_allow_html=True)
-        cats_df = run_query("SELECT category_id, category_name FROM categories ORDER BY category_name")
-        if not cats_df.empty:
-            category_names = cats_df["category_name"].dropna().tolist()
+        category_names = sorted(categories_df["category_name"].dropna().unique().tolist())
+        if category_names:
             default_idx = category_names.index("ITF Men") if "ITF Men" in category_names else 0
             selected_category = st.selectbox("Select a category", category_names, index=default_idx)
             
-            safe_cat = selected_category.replace("'", "''")
-            sel_cat_df = run_query(
-                f"""
-                SELECT co.competition_id, co.competition_name, co.type, co.gender, c.category_name
-                FROM competitions co
-                JOIN categories c ON co.category_id = c.category_id
-                WHERE c.category_name = '{safe_cat}'
-                ORDER BY co.competition_name
-                """
-            )
+            sel_cat_df = merged_comp_df[merged_comp_df["category_name"] == selected_category] \
+                [["competition_id", "competition_name", "type", "gender", "category_name"]] \
+                .sort_values(by="competition_name")
             st.dataframe(sel_cat_df, use_container_width=True, hide_index=True)
 
     with tab5:
         st.markdown('<div class="section-header">🔗 Parent and Sub-Competitions</div>', unsafe_allow_html=True)
-        hierarchy_df = run_query(
-            """
-            SELECT child.competition_id, child.competition_name AS sub_competition,
-                   parent.competition_name AS parent_competition, child.type, child.gender
-            FROM competitions child
-            LEFT JOIN competitions parent ON child.parent_id = parent.competition_id
-            WHERE child.parent_id IS NOT NULL
-            ORDER BY parent.competition_name, child.competition_name
-            """
+        hierarchy_df = competitions_df[competitions_df["parent_id"].notna()].merge(
+            competitions_df, left_on="parent_id", right_on="competition_id", suffixes=("", "_parent")
         )
+        hierarchy_df = hierarchy_df.rename(columns={
+            "competition_name": "sub_competition",
+            "competition_name_parent": "parent_competition"
+        })[["competition_id", "sub_competition", "parent_competition", "type", "gender"]] \
+          .sort_values(by=["parent_competition", "sub_competition"])
+
         if not hierarchy_df.empty:
             st.dataframe(hierarchy_df, use_container_width=True, hide_index=True)
 
     with tab6:
         st.markdown('<div class="section-header">📈 Competition Type Distribution by Category</div>', unsafe_allow_html=True)
-        type_dist_df = run_query(
-            """
-            SELECT c.category_name, co.type, COUNT(*) AS total_competitions
-            FROM competitions co
-            JOIN categories c ON co.category_id = c.category_id
-            GROUP BY c.category_id, c.category_name, co.type
-            ORDER BY c.category_name, total_competitions DESC
-            """
-        )
+        type_dist_df = merged_comp_df.groupby(["category_name", "type"], as_index=False) \
+            .agg(total_competitions=("competition_id", "count")) \
+            .sort_values(by=["category_name", "total_competitions"], ascending=[True, False])
+
         if not type_dist_df.empty:
             category_filter = st.multiselect("Filter categories", sorted(type_dist_df["category_name"].dropna().unique()), default=[])
             if category_filter:
@@ -1020,20 +564,15 @@ elif page == NAV_COMPETITIONS:
 
     with tab7:
         st.markdown('<div class="section-header">🏆 Top-Level Competitions</div>', unsafe_allow_html=True)
-        top_level_df = run_query(
-            """
-            SELECT co.competition_id, co.competition_name, co.type, co.gender, c.category_name
-            FROM competitions co
-            LEFT JOIN categories c ON co.category_id = c.category_id
-            WHERE co.parent_id IS NULL
-            ORDER BY co.competition_name
-            """
-        )
+        top_level_df = merged_comp_df[merged_comp_df["parent_id"].isna()] \
+            [["competition_id", "competition_name", "type", "gender", "category_name"]] \
+            .sort_values(by="competition_name")
+
         if not top_level_df.empty:
             st.dataframe(top_level_df, use_container_width=True, hide_index=True)
 
 # ============================================================
-# PAGE 3: VENUES & LOGISTICS (FIXED NAV MATCH)
+# PAGE 3: VENUES & LOGISTICS
 # ============================================================
 elif page == NAV_VENUES:
     st.markdown(
@@ -1046,15 +585,10 @@ elif page == NAV_VENUES:
         unsafe_allow_html=True
     )
 
-    c_tot = run_query("SELECT COUNT(*) AS total FROM complexes")
-    v_tot = run_query("SELECT COUNT(*) AS total FROM venues")
-    cntry_tot = run_query("SELECT COUNT(DISTINCT country_name) AS total FROM venues")
-    tz_tot = run_query("SELECT COUNT(DISTINCT timezone) AS total FROM venues")
-
-    t_c = int(c_tot.iloc[0]["total"]) if not c_tot.empty else 0
-    t_v = int(v_tot.iloc[0]["total"]) if not v_tot.empty else 0
-    t_cntry = int(cntry_tot.iloc[0]["total"]) if not cntry_tot.empty else 0
-    t_tz = int(tz_tot.iloc[0]["total"]) if not tz_tot.empty else 0
+    t_c = len(complexes_df)
+    t_v = len(venues_df)
+    t_cntry = venues_df["country_name"].nunique()
+    t_tz = venues_df["timezone"].nunique()
 
     col1, col2, col3, col4 = st.columns(4)
     with col1: display_kpi("Complexes", f"{t_c:,}")
@@ -1076,32 +610,25 @@ elif page == NAV_VENUES:
         ]
     )
 
+    merged_venues_df = venues_df.merge(complexes_df, on="complex_id", how="left")
+
     with tab1:
         st.markdown('<div class="section-header">📋 All Venues with Associated Complex</div>', unsafe_allow_html=True)
-        venues_df = run_query(
-            """
-            SELECT v.venue_id, v.venue_name, v.city_name, v.country_name, v.country_code, v.timezone, c.complex_name
-            FROM venues v
-            LEFT JOIN complexes c ON v.complex_id = c.complex_id
-            ORDER BY v.venue_name
-            """
-        )
-        if not venues_df.empty:
+        venues_display_df = merged_venues_df[["venue_id", "venue_name", "city_name", "country_name", "country_code", "timezone", "complex_name"]] \
+            .sort_values(by="venue_name")
+
+        if not venues_display_df.empty:
             search_v = st.text_input("🔍 Search venue", placeholder="Enter venue name...", key="v_search")
-            filtered_v = venues_df[venues_df["venue_name"].str.contains(search_v, case=False, na=False)] if search_v else venues_df
+            filtered_v = venues_display_df[venues_display_df["venue_name"].str.contains(search_v, case=False, na=False)] if search_v else venues_display_df
             st.dataframe(filtered_v, use_container_width=True, hide_index=True)
 
     with tab2:
         st.markdown('<div class="section-header">📊 Number of Venues in Each Complex</div>', unsafe_allow_html=True)
-        v_per_c_df = run_query(
-            """
-            SELECT c.complex_name, COUNT(v.venue_id) AS total_venues
-            FROM complexes c
-            LEFT JOIN venues v ON c.complex_id = v.complex_id
-            GROUP BY c.complex_id, c.complex_name
-            ORDER BY total_venues DESC
-            """
-        )
+        v_per_c_df = complexes_df.merge(venues_df, on="complex_id", how="left") \
+            .groupby(["complex_id", "complex_name"], as_index=False) \
+            .agg(total_venues=("venue_id", "count")) \
+            .sort_values(by="total_venues", ascending=False)
+
         if not v_per_c_df.empty:
             fig = px.bar(
                 v_per_c_df.head(15),
@@ -1119,26 +646,21 @@ elif page == NAV_VENUES:
 
     with tab3:
         st.markdown('<div class="section-header">🌎 Venues in a Specific Country</div>', unsafe_allow_html=True)
-        countries_df = run_query("SELECT DISTINCT country_name FROM venues WHERE country_name IS NOT NULL ORDER BY country_name")
-        if not countries_df.empty:
-            countries = countries_df["country_name"].dropna().tolist()
+        countries = sorted(venues_df["country_name"].dropna().unique().tolist())
+        if countries:
             default_c = countries.index("Chile") if "Chile" in countries else 0
             selected_country = st.selectbox("Select country", countries, index=default_c)
-            safe_c = selected_country.replace("'", "''")
-            c_venues_df = run_query(
-                f"""
-                SELECT v.venue_id, v.venue_name, v.city_name, v.country_name, v.country_code, v.timezone, c.complex_name
-                FROM venues v
-                LEFT JOIN complexes c ON v.complex_id = c.complex_id
-                WHERE v.country_name = '{safe_c}'
-                ORDER BY v.venue_name
-                """
-            )
+            
+            c_venues_df = merged_venues_df[merged_venues_df["country_name"] == selected_country] \
+                [["venue_id", "venue_name", "city_name", "country_name", "country_code", "timezone", "complex_name"]] \
+                .sort_values(by="venue_name")
             st.dataframe(c_venues_df, use_container_width=True, hide_index=True)
 
     with tab4:
         st.markdown('<div class="section-header">🕐 Venues and Their Timezones</div>', unsafe_allow_html=True)
-        timezone_df = run_query("SELECT venue_name, city_name, country_name, timezone FROM venues ORDER BY timezone, venue_name")
+        timezone_df = venues_df[["venue_name", "city_name", "country_name", "timezone"]] \
+            .sort_values(by=["timezone", "venue_name"])
+
         if not timezone_df.empty:
             tz_filter = st.multiselect("Filter by timezone", sorted(timezone_df["timezone"].dropna().unique()))
             filtered_tz = timezone_df[timezone_df["timezone"].isin(tz_filter)] if tz_filter else timezone_df
@@ -1146,16 +668,11 @@ elif page == NAV_VENUES:
 
     with tab5:
         st.markdown('<div class="section-header">🏟️ Complexes with More Than One Venue</div>', unsafe_allow_html=True)
-        multi_venue_df = run_query(
-            """
-            SELECT c.complex_id, c.complex_name, COUNT(v.venue_id) AS total_venues
-            FROM complexes c
-            JOIN venues v ON c.complex_id = v.complex_id
-            GROUP BY c.complex_id, c.complex_name
-            HAVING COUNT(v.venue_id) > 1
-            ORDER BY total_venues DESC
-            """
-        )
+        multi_venue_df = complexes_df.merge(venues_df, on="complex_id", how="inner") \
+            .groupby(["complex_id", "complex_name"], as_index=False) \
+            .agg(total_venues=("venue_id", "count"))
+        multi_venue_df = multi_venue_df[multi_venue_df["total_venues"] > 1].sort_values(by="total_venues", ascending=False)
+
         if not multi_venue_df.empty:
             fig = px.bar(
                 multi_venue_df.head(15),
@@ -1173,14 +690,10 @@ elif page == NAV_VENUES:
 
     with tab6:
         st.markdown('<div class="section-header">🌍 Venues Grouped by Country</div>', unsafe_allow_html=True)
-        c_group_df = run_query(
-            """
-            SELECT country_name, country_code, COUNT(*) AS total_venues
-            FROM venues
-            GROUP BY country_name, country_code
-            ORDER BY total_venues DESC
-            """
-        )
+        c_group_df = venues_df.groupby(["country_name", "country_code"], as_index=False) \
+            .agg(total_venues=("venue_id", "count")) \
+            .sort_values(by="total_venues", ascending=False)
+
         if not c_group_df.empty:
             fig = px.bar(
                 c_group_df.head(20),
@@ -1198,21 +711,14 @@ elif page == NAV_VENUES:
 
     with tab7:
         st.markdown('<div class="section-header">🔎 Venues for a Specific Complex</div>', unsafe_allow_html=True)
-        complexes_df = run_query("SELECT complex_id, complex_name FROM complexes ORDER BY complex_name")
-        if not complexes_df.empty:
-            complex_names = complexes_df["complex_name"].dropna().tolist()
+        complex_names = sorted(complexes_df["complex_name"].dropna().unique().tolist())
+        if complex_names:
             default_cmplx = complex_names.index("Nacional") if "Nacional" in complex_names else 0
             selected_complex = st.selectbox("Select complex", complex_names, index=default_cmplx)
-            safe_cmplx = selected_complex.replace("'", "''")
-            sel_cmplx_df = run_query(
-                f"""
-                SELECT v.venue_id, v.venue_name, v.city_name, v.country_name, v.country_code, v.timezone, c.complex_name
-                FROM venues v
-                JOIN complexes c ON v.complex_id = c.complex_id
-                WHERE c.complex_name = '{safe_cmplx}'
-                ORDER BY v.venue_name
-                """
-            )
+            
+            sel_cmplx_df = merged_venues_df[merged_venues_df["complex_name"] == selected_complex] \
+                [["venue_id", "venue_name", "city_name", "country_name", "country_code", "timezone", "complex_name"]] \
+                .sort_values(by="venue_name")
             st.dataframe(sel_cmplx_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1229,17 +735,11 @@ elif page == NAV_RANKINGS:
         unsafe_allow_html=True
     )
 
-    comp_tot = run_query("SELECT COUNT(*) AS total FROM competitors")
-    cntry_tot = run_query("SELECT COUNT(DISTINCT country) AS total FROM competitors")
-    pts_tot = run_query("SELECT MAX(points) AS highest_points FROM competitor_rankings")
-    stbl_tot = run_query("SELECT COUNT(*) AS total FROM competitor_rankings WHERE movement = 0")
-    top5_tot = run_query("SELECT COUNT(*) AS total FROM competitor_rankings WHERE `rank` <= 5")
-
-    t_comp = int(comp_tot.iloc[0]["total"]) if not comp_tot.empty else 0
-    t_cntry = int(cntry_tot.iloc[0]["total"]) if not cntry_tot.empty else 0
-    t_pts = int(pts_tot.iloc[0]["highest_points"]) if not pts_tot.empty else 0
-    t_stbl = int(stbl_tot.iloc[0]["total"]) if not stbl_tot.empty else 0
-    t_top5 = int(top5_tot.iloc[0]["total"]) if not top5_tot.empty else 0
+    t_comp = len(competitors_df)
+    t_cntry = competitors_df["country"].nunique()
+    t_pts = int(rankings_df["points"].max())
+    t_stbl = len(rankings_df[rankings_df["movement"] == 0])
+    t_top5 = len(rankings_df[rankings_df["rank"] <= 5])
 
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1: display_kpi("Competitors", f"{t_comp:,}")
@@ -1261,55 +761,47 @@ elif page == NAV_RANKINGS:
         ]
     )
 
+    merged_rankings_df = competitors_df.merge(rankings_df, on="competitor_id")
+
     with tab1:
         st.markdown('<div class="section-header">📋 Competitor Rankings Explorer</div>', unsafe_allow_html=True)
-        rankings_df = run_query(
-            """
-            SELECT c.competitor_id, c.name, c.country, c.country_code, cr.`rank`, cr.movement, cr.points, cr.competitions_played
-            FROM competitors c
-            JOIN competitor_rankings cr ON c.competitor_id = cr.competitor_id
-            ORDER BY cr.`rank`
-            """
-        )
-        if not rankings_df.empty:
+        all_rankings_df = merged_rankings_df[["competitor_id", "name", "country", "country_code", "rank", "movement", "points", "competitions_played"]] \
+            .sort_values(by="rank")
+
+        if not all_rankings_df.empty:
             c_f1, c_f2, c_f3 = st.columns(3)
             with c_f1: search_name = st.text_input("🔍 Search competitor", placeholder="Enter competitor name...", key="rank_s")
             with c_f2:
-                countries = sorted(rankings_df["country"].dropna().unique().tolist())
+                countries = sorted(all_rankings_df["country"].dropna().unique().tolist())
                 selected_countries = st.multiselect("🌍 Filter by country", countries)
             with c_f3:
-                max_rank = int(rankings_df["rank"].max())
+                max_rank = int(all_rankings_df["rank"].max())
                 rank_range = st.slider("🏆 Rank range", min_value=1, max_value=max_rank, value=(1, min(50, max_rank)))
 
-            min_points = st.number_input("⭐ Minimum ranking points", min_value=0, max_value=int(rankings_df["points"].max()), value=0, step=100)
+            min_points = st.number_input("⭐ Minimum ranking points", min_value=0, max_value=int(all_rankings_df["points"].max()), value=0, step=100)
 
-            filtered_df = rankings_df.copy()
+            filtered_df = all_rankings_df.copy()
             if search_name: filtered_df = filtered_df[filtered_df["name"].str.contains(search_name, case=False, na=False)]
             if selected_countries: filtered_df = filtered_df[filtered_df["country"].isin(selected_countries)]
             filtered_df = filtered_df[(filtered_df["rank"] >= rank_range[0]) & (filtered_df["rank"] <= rank_range[1]) & (filtered_df["points"] >= min_points)]
 
-            st.caption(f"Showing {len(filtered_df):,} of {len(rankings_df):,} competitors")
+            st.caption(f"Showing {len(filtered_df):,} of {len(all_rankings_df):,} competitors")
             st.dataframe(
                 filtered_df,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "points": st.column_config.ProgressColumn("points", format="%d", min_value=0, max_value=int(rankings_df["points"].max())),
+                    "points": st.column_config.ProgressColumn("points", format="%d", min_value=0, max_value=int(all_rankings_df["points"].max())),
                     "movement": st.column_config.NumberColumn("movement", format="%+d")
                 }
             )
 
     with tab2:
         st.markdown('<div class="section-header">🏆 Top 5 Competitors</div>', unsafe_allow_html=True)
-        top_five_df = run_query(
-            """
-            SELECT c.competitor_id, c.name, c.country, cr.`rank`, cr.movement, cr.points, cr.competitions_played
-            FROM competitors c
-            JOIN competitor_rankings cr ON c.competitor_id = cr.competitor_id
-            WHERE cr.`rank` <= 5
-            ORDER BY cr.`rank`
-            """
-        )
+        top_five_df = merged_rankings_df[merged_rankings_df["rank"] <= 5] \
+            [["competitor_id", "name", "country", "rank", "movement", "points", "competitions_played"]] \
+            .sort_values(by="rank")
+
         if not top_five_df.empty:
             st.dataframe(top_five_df, use_container_width=True, hide_index=True)
             fig = px.bar(
@@ -1328,15 +820,10 @@ elif page == NAV_RANKINGS:
 
     with tab3:
         st.markdown('<div class="section-header">↔️ Competitors with No Rank Movement</div>', unsafe_allow_html=True)
-        stable_df = run_query(
-            """
-            SELECT c.competitor_id, c.name, c.country, cr.`rank`, cr.movement, cr.points, cr.competitions_played
-            FROM competitors c
-            JOIN competitor_rankings cr ON c.competitor_id = cr.competitor_id
-            WHERE cr.movement = 0
-            ORDER BY cr.`rank`
-            """
-        )
+        stable_df = merged_rankings_df[merged_rankings_df["movement"] == 0] \
+            [["competitor_id", "name", "country", "rank", "movement", "points", "competitions_played"]] \
+            .sort_values(by="rank")
+
         if not stable_df.empty:
             search_stable = st.text_input("🔍 Search stable competitor", placeholder="Enter competitor name...", key="stable_search")
             display_stable_df = stable_df[stable_df["name"].str.contains(search_stable, case=False, na=False)] if search_stable else stable_df
@@ -1344,49 +831,29 @@ elif page == NAV_RANKINGS:
 
     with tab4:
         st.markdown('<div class="section-header">🌍 Country-Wise Ranking Points</div>', unsafe_allow_html=True)
-        country_df = run_query("SELECT DISTINCT country FROM competitors WHERE country IS NOT NULL ORDER BY country")
-        if not country_df.empty:
-            countries = country_df["country"].dropna().tolist()
+        countries = sorted(competitors_df["country"].dropna().unique().tolist())
+        if countries:
             default_cntry = countries.index("Croatia") if "Croatia" in countries else 0
             selected_country = st.selectbox("Select country", countries, index=default_cntry, key="c_pts_select")
-            safe_country = selected_country.replace("'", "''")
             
-            country_pts_df = run_query(
-                f"""
-                SELECT c.country, COUNT(*) AS total_competitors, SUM(cr.points) AS total_points, AVG(cr.points) AS average_points
-                FROM competitors c
-                JOIN competitor_rankings cr ON c.competitor_id = cr.competitor_id
-                WHERE c.country = '{safe_country}'
-                GROUP BY c.country
-                """
-            )
-            if not country_pts_df.empty:
+            country_competitors_df = merged_rankings_df[merged_rankings_df["country"] == selected_country] \
+                [["name", "country", "rank", "movement", "points", "competitions_played"]] \
+                .sort_values(by="rank")
+
+            if not country_competitors_df.empty:
                 col_c1, col_c2, col_c3 = st.columns(3)
-                with col_c1: display_kpi("Competitors", f"{int(country_pts_df.iloc[0]['total_competitors']):,}")
-                with col_c2: display_kpi("Total Points", f"{int(country_pts_df.iloc[0]['total_points']):,}")
-                with col_c3: display_kpi("Average Points", f"{country_pts_df.iloc[0]['average_points']:,.0f}")
+                with col_c1: display_kpi("Competitors", f"{len(country_competitors_df):,}")
+                with col_c2: display_kpi("Total Points", f"{int(country_competitors_df['points'].sum()):,}")
+                with col_c3: display_kpi("Average Points", f"{country_competitors_df['points'].mean():,.0f}")
                 st.markdown("<br>", unsafe_allow_html=True)
-                country_competitors_df = run_query(
-                    f"""
-                    SELECT c.name, c.country, cr.`rank`, cr.movement, cr.points, cr.competitions_played
-                    FROM competitors c
-                    JOIN competitor_rankings cr ON c.competitor_id = cr.competitor_id
-                    WHERE c.country = '{safe_country}'
-                    ORDER BY cr.`rank`
-                    """
-                )
                 st.dataframe(country_competitors_df, use_container_width=True, hide_index=True)
 
     with tab5:
         st.markdown('<div class="section-header">📊 Competitors by Country</div>', unsafe_allow_html=True)
-        competitors_country_df = run_query(
-            """
-            SELECT country, COUNT(*) AS total_competitors
-            FROM competitors
-            GROUP BY country
-            ORDER BY total_competitors DESC
-            """
-        )
+        competitors_country_df = competitors_df.groupby("country", as_index=False) \
+            .agg(total_competitors=("competitor_id", "count")) \
+            .sort_values(by="total_competitors", ascending=False)
+
         if not competitors_country_df.empty:
             fig = px.bar(
                 competitors_country_df.head(20),
@@ -1404,20 +871,13 @@ elif page == NAV_RANKINGS:
 
     with tab6:
         st.markdown('<div class="section-header">⭐ Highest Ranking Points</div>', unsafe_allow_html=True)
-        highest_pts_v_df = run_query("SELECT MAX(points) AS max_points FROM competitor_rankings")
-        if not highest_pts_v_df.empty:
-            max_points = int(highest_pts_v_df.iloc[0]["max_points"])
-            highest_competitors_df = run_query(
-                f"""
-                SELECT c.competitor_id, c.name, c.country, cr.`rank`, cr.movement, cr.points, cr.competitions_played
-                FROM competitors c
-                JOIN competitor_rankings cr ON c.competitor_id = cr.competitor_id
-                WHERE cr.points = {max_points}
-                ORDER BY cr.`rank`
-                """
-            )
-            st.metric("Highest Ranking Points Standard", f"{max_points:,}")
-            st.dataframe(highest_competitors_df, use_container_width=True, hide_index=True)
+        max_points = int(rankings_df["points"].max())
+        highest_competitors_df = merged_rankings_df[merged_rankings_df["points"] == max_points] \
+            [["competitor_id", "name", "country", "rank", "movement", "points", "competitions_played"]] \
+            .sort_values(by="rank")
+
+        st.metric("Highest Ranking Points Standard", f"{max_points:,}")
+        st.dataframe(highest_competitors_df, use_container_width=True, hide_index=True)
 
 # ============================================================
 # FOOTER

@@ -14,15 +14,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Load environment variables
-load_dotenv()
-
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_NAME = os.getenv("DB_NAME", "tennis_db")
-
 # NAVIGATION CONSTANTS (Ensures exact string matching across radio & logic)
 NAV_OVERVIEW = "🏠 Executive Overview"
 NAV_COMPETITIONS = "🏆 Competition Analytics"
